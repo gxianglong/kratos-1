@@ -26,13 +26,15 @@ public abstract class WeightResolver {
 	public static int getIndex(String wr_weight, boolean operation) {
 		int index = -1;
 		if (wr_weight.matches("[rR][0-9]+[wW][0-9]+")) {
+			wr_weight = wr_weight.toUpperCase();
 			String str = null;
-			if (operation)
+			if (operation) {
 				str = "W";
-			else
+				index = Integer.parseInt(wr_weight.substring(wr_weight.indexOf(str) + 1));
+			} else {
 				str = "R";
-			String wr_weight_ = wr_weight.toUpperCase();
-			index = Integer.parseInt(String.valueOf(wr_weight_.substring(wr_weight_.indexOf(str) + 1).charAt(0)));
+				index = Integer.parseInt(wr_weight.substring(wr_weight.indexOf(str) + 1, wr_weight.indexOf("W")));
+			}
 		} else {
 			throw new WeightException("master/slave读写分离权重配置信息有误");
 		}
