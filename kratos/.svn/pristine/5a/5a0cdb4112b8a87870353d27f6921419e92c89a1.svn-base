@@ -1,1 +1,0 @@
-addUser=insert into userinfo(userinfo_id) values(?)
