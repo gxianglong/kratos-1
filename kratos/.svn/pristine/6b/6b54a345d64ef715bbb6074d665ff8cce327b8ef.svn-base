@@ -1,0 +1,258 @@
+package com.gxl.kratos.jdbc.core;
+
+import java.util.Arrays;
+import java.util.List;
+import javax.annotation.Resource;
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.aspectj.lang.annotation.Around;
+import org.aspectj.lang.annotation.Aspect;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import com.gxl.kratos.jdbc.datasource.config.DataSourceHolder;
+import com.gxl.kratos.jdbc.exception.ShardException;
+import com.gxl.kratos.jdbc.mysql.sqlparser.SqlParser;
+import com.gxl.kratos.jdbc.shard.DbRule;
+import com.gxl.kratos.jdbc.shard.GetKeyName;
+import com.gxl.kratos.jdbc.shard.TbRule;
+
+/**
+ * 基于SpringAop的方式动态对数据源进行切换
+ * 
+ * @author gaoxianglong
+ */
+@Aspect
+public class SwitchDataSource {
+	private static Logger logger = LoggerFactory.getLogger(SwitchDataSource.class);
+	@Resource
+	private KratosJdbcTemplate kJdbcTemplate;
+	@Resource
+	private DataSourceHolder dataSourceHolder;
+	@Resource
+	private DbRule dbRule;
+	@Resource
+	private TbRule tbRule;
+	@Resource
+	private SqlParser sqlParser;
+	@Resource
+	private SwitchTab switchTab;
+
+	/**
+	 * 基于SpringAop的方式对JdbcTemplate下所有的update方法进行拦截
+	 * 
+	 * @author gaoxianglong
+	 * 
+	 * @param proceedingJoinPoint
+	 *            委托对象的上下文信息
+	 * 
+	 * @exception Throwable
+	 * 
+	 * @return Object
+	 */
+	@Around("execution(* com.gxl.kratos.jdbc.core.KratosJdbcTemplate.update*(..))")
+	public Object executeUpdate(ProceedingJoinPoint proceedingJoinPoint) {
+		long exeBefor = System.currentTimeMillis();
+		Object result = null;
+		/* 获取委托对象指定方法参数 */
+		Object[] params = proceedingJoinPoint.getArgs();
+		Object param = params[0];
+		if (param.getClass() == String.class) {
+			String sql = (String) param;
+			logger.info("之前的数据库sql-->" + sql);
+			/* 检测是否需要执行分库分表操作 */
+			if (kJdbcTemplate.getIsShard()) {
+				/* 检测分表模式 */
+				if (kJdbcTemplate.getShardMode()) {
+					/* 一库一片模式 */
+					logger.debug("当前采用的分片模式为一库一片");
+					params = oneTbshard(sql, params, true).toArray();
+					logger.info("sharding之后准备执行的数据库sql-->" + params[0].toString());
+				} else {
+					/* 库内分片模式 */
+					logger.debug("当前采用的分片模式为库内分片");
+					params = manyTbshard(sql, params, true).toArray();
+					logger.info("sharding之后准备执行的数据库sql-->" + params[0].toString());
+				}
+			} else {
+				/* 获取master的起始索引 */
+				int masterIndex = WeightResolver.getIndex(kJdbcTemplate.getWr_weight(), true);
+				/* 切换数据源到master上 */
+				dataSourceHolder.setRoutingIndex(masterIndex);
+			}
+			try {
+				/* 执行委托对象的目标方法 */
+				result = proceedingJoinPoint.proceed(params);
+				logger.debug("执行耗时->" + (System.currentTimeMillis() - exeBefor) + "ms");
+			} catch (Throwable e) {
+				e.printStackTrace();
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * 基于SpringAop的方式对JdbcTemplate下所有的query方法进行拦截
+	 * 
+	 * @author gaoxianglong
+	 * 
+	 * @param proceedingJoinPoint
+	 *            委托对象的上下文信息
+	 * 
+	 * @exception Throwable
+	 * 
+	 * @return Object
+	 */
+	@Around("execution(* com.gxl.kratos.jdbc.core.KratosJdbcTemplate.query*(..))")
+	public Object executeQuery(ProceedingJoinPoint proceedingJoinPoint) {
+		long exeBefor = System.currentTimeMillis();
+		Object result = null;
+		/* 获取委托对象指定方法参数 */
+		Object[] params = proceedingJoinPoint.getArgs();
+		Object param = params[0];
+		if (param.getClass() == String.class) {
+			String sql = (String) param;
+			logger.info("之前的数据库sql-->" + sql);
+			/* 检测是否需要执行分库分表操作 */
+			if (kJdbcTemplate.getIsShard()) {
+				/* 检测分表模式 */
+				if (kJdbcTemplate.getShardMode()) {
+					/* 一库一片模式 */
+					logger.debug("当前采用的分片模式为一库一片");
+					params = oneTbshard(sql, params, false).toArray();
+					logger.info("sharding之后准备执行的数据库sql-->" + params[0].toString());
+				} else {
+					/* 库内分片模式 */
+					logger.debug("当前采用的分片模式为库内分片");
+					params = manyTbshard(sql, params, false).toArray();
+					logger.info("sharding之后准备执行的数据库sql-->" + params[0].toString());
+				}
+			} else {
+				/* 获取master的起始索引 */
+				int masterIndex = WeightResolver.getIndex(kJdbcTemplate.getWr_weight(), false);
+				/* 切换数据源到master上 */
+				dataSourceHolder.setRoutingIndex(masterIndex);
+			}
+			try {
+				/* 执行委托对象的目标方法 */
+				result = proceedingJoinPoint.proceed(params);
+				logger.debug("执行耗时->" + (System.currentTimeMillis() - exeBefor) + "ms");
+			} catch (Throwable e) {
+				e.printStackTrace();
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * 執行库内分片的分片模式
+	 * 
+	 * @author gaoxianglong
+	 * 
+	 * @param sql
+	 *            需要进行重写的sql语句
+	 * 
+	 * @param params
+	 *            委托对象的方法入参
+	 * 
+	 * @param operation
+	 *            读写操作
+	 * 
+	 * @param operation
+	 *            true为master启始索引，false为slave启始索引
+	 * 
+	 * @exception ShardException
+	 * 
+	 * @return List<Object> 重写后的委托对象的上下文信息
+	 */
+	protected List<Object> manyTbshard(String sql, Object[] params, boolean operation) {
+		/* 获取配置文件中的分库分表条件 */
+		String dbRuleArray = kJdbcTemplate.getDbRuleArray().toLowerCase().replaceAll("\\s", "");
+		String tbRuleArray = kJdbcTemplate.getTbRuleArray().toLowerCase().replaceAll("\\s", "");
+		/* 获取配置文件中分库分表的关键字 */
+		List<String> keyNames = GetKeyName.getName(false, dbRuleArray, tbRuleArray);
+		/* 解析分库分表条件 */
+		long key = sqlParser.getKey(sql, keyNames);
+		/* 获取数据库索引 */
+		int dbIndex = dbRule.getIndex(key, dbRuleArray);
+		/* 获取表索引 */
+		int tbIndex = tbRule.getIndex(key, tbRuleArray);
+		/* 解析配置文件中数据库和数据库表的数量 */
+		String values[] = tbRuleArray.split("[\\%]");
+		int tbSize = Integer.parseInt(values[1]);
+		int dbSize = Integer.parseInt(values[2]);
+		/* 持有真正的数据库表名的sql */
+		String newSql = switchTab.setTabName(dbIndex, tbIndex, dbSize, tbSize, kJdbcTemplate.getConsistent(),
+				sqlParser.getTbName(sql), sql);
+		/* 获取master的起始索引 */
+		int masterIndex = WeightResolver.getIndex(kJdbcTemplate.getWr_weight(), operation);
+		dbIndex += masterIndex;
+		/* 切换数据源 */
+		setRoutingIndex(dbIndex);
+		/* 重写委托对象的上下文信息，替换原先入参 */
+		List<Object> newParams = Arrays.asList(params);
+		newParams.set(0, newSql);
+		return newParams;
+	}
+
+	/**
+	 * 執行一库一片的分片模式
+	 * 
+	 * @author gaoxianglong
+	 * 
+	 * @param sql
+	 *            需要进行重写的sql语句
+	 * 
+	 * @param params
+	 *            委托对象的方法入参
+	 * 
+	 * @param operation
+	 *            读写操作
+	 * 
+	 * @param operation
+	 *            true为master启始索引，false为slave启始索引
+	 * 
+	 * @exception ShardException
+	 * 
+	 * @return List<Object> 重写后的委托对象的上下文信息
+	 */
+	protected List<Object> oneTbshard(String sql, Object[] params, boolean operation) {
+		/* 获取配置文件中的分库分表条件 */
+		String dbRuleArray = kJdbcTemplate.getDbRuleArray().toLowerCase().replaceAll("\\s", "");
+		/* 获取配置文件中分库分表的关键字 */
+		List<String> keyNames = GetKeyName.getName(true, dbRuleArray, null);
+		/* 解析分库分表条件 */
+		long key = sqlParser.getKey(sql, keyNames);
+		/* 获取数据库索引 */
+		int dbIndex = dbRule.getIndex(key, dbRuleArray);
+		String newSql = null;
+		if (kJdbcTemplate.getConsistent()) {
+			/* 持有真正的数据库表名的sql */
+			newSql = switchTab.setTabName(dbIndex, sqlParser.getTbName(sql), sql);
+		} else {
+			newSql = sql;
+		}
+		/* 获取master的起始索引 */
+		int masterIndex = WeightResolver.getIndex(kJdbcTemplate.getWr_weight(), operation);
+		dbIndex += masterIndex;
+		/* 切换数据源 */
+		setRoutingIndex(dbIndex);
+		/* 重写委托对象的上下文信息，替换原先入参 */
+		List<Object> newParams = Arrays.asList(params);
+		newParams.set(0, newSql);
+		return newParams;
+	}
+
+	/**
+	 * 切换数据源
+	 * 
+	 * @author gaoxianglong
+	 * 
+	 * @param dbIndex
+	 *            数据库索引
+	 * 
+	 * @return void
+	 */
+	private void setRoutingIndex(int dbIndex) {
+		dataSourceHolder.setRoutingIndex(dbIndex);
+		logger.info("kratos成功切换数据源,当前所持有的数据源索引为-->" + dbIndex);
+	}
+}

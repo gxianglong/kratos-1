@@ -1,0 +1,29 @@
+package com.gxl.kratos.jdbc.datasource.config;
+
+import javax.annotation.Resource;
+
+import org.springframework.jdbc.datasource.lookup.AbstractRoutingDataSource;
+
+/**
+ * kratos数据源路由实现，持有多数据源
+ * 
+ * 该数据源继承自Spring提供的AbstractRoutingDataSource，可以根据配置文件中的数据源key对多数据源进行动态切换，
+ * 能够非常方便的实现数据源路由工作
+ * 
+ * @author gaoxianglong
+ */
+public class KratosDatasourceGroup extends AbstractRoutingDataSource implements DataSource {
+	@Resource
+	private DataSourceHolder dataSourceHolder;
+
+	private KratosDatasourceGroup() {
+	}
+
+	@Override
+	protected Object determineCurrentLookupKey() {
+		int index = -1;
+		if (null != dataSourceHolder)
+			index = dataSourceHolder.getRoutingIndex();
+		return index;
+	}
+}
